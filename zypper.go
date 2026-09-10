@@ -742,6 +742,59 @@ func handleDistUpgrade(ctx context.Context, tmpDir string) error {
 	return nil
 }
 
+func handleUpdate(ctx context.Context, tmpDir string) error {
+	tracker := &MountTracker{}
+	defer vlcroCleanup(tmpDir, tracker)
+
+	statusMsg("Reading package lists")
+	statusMsg("Building dependency tree")
+	info, err := dryRunAndParse([]string{"update", "--dry-run"})
+	if err != nil {
+		errorf("%s", colorText(colorError, fmt.Sprintf("Error: %v", err)))
+		return err
+	}
+
+	if info.nothingToDo {
+		infof("%s", colorText(colorInfo, "Nothing to do. Exiting..."))
+		return nil
+	}
+
+	cfg.txInfo = info.installs
+
+	if !showTransactionAndConfirm(info) {
+		return nil
+	}
+
+	getZyppLock()
+
+	if info.downloadSize > 0 {
+		statusMsg("Downloading packages")
+		err := mainTask(ctx, pkgNames(info.installs), tmpDir, false, tracker)
+		if err == context.Canceled {
+			return err
+		}
+		if err != nil {
+			warningf("%s", colorText(colorWarning, fmt.Sprintf("Parallel execution failed (%v). Falling back to standard zypper...", err)))
+		}
+	}
+
+	vlcroCleanup(tmpDir, tracker)
+
+	if !cfg.downloadOnly {
+		infof("%s", colorText(colorInfo, "Vlcro has finished its tasks. Handing you over to zypper..."))
+		nonInteractive := ""
+		if cfg.noConfirm {
+			nonInteractive = "--non-interactive"
+		}
+		code := handover(fmt.Sprintf("env ZYPP_CURL2=1 ZYPP_PCK_PRELOAD=1 ZYPP_SINGLE_RPMTRANS=1 zypper %s --no-cd update", nonInteractive))
+		if code != 0 {
+			return fmt.Errorf("zypper update failed with exit code %d", code)
+		}
+	}
+
+	return nil
+}
+
 func handleInstall(ctx context.Context, tmpDir string) error {
 	if len(cfg.packages) == 0 {
 		errorf("%s", colorText(colorError, "No packages specified for installation"))

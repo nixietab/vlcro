@@ -33,7 +33,7 @@ type config struct {
 	txInfo       []packageInfo // parsed packages from dry-run
 }
 
-// CLI 
+// CLI
 
 func printHelp() {
 	// Ensure cfg is available for colorStart
@@ -52,7 +52,7 @@ func printHelp() {
 	}
 
 	usage := fmt.Sprintf(`%susage%s: vlcro [-h] [-v] [-y] [-j N] [--debug] [--no-color]
-%s      {refresh,ref,dist-upgrade,dup,install,in,install-new-recommends,inr} ...
+%s      {refresh,ref,dist-upgrade,dup,update,up,install,in,install-new-recommends,inr} ...
 
 %s%s%s (%sv%s%s) makes zypper faster by running slow operations in parallel.
 
@@ -71,6 +71,9 @@ func printHelp() {
   %sdist-upgrade%s (%sdup%s)   perform distribution upgrade
     %s-d, --download-only%s download packages without installing
 
+  %supdate%s (%sup%s)         update all installed packages
+    %s-d, --download-only%s download packages without installing
+
   %sinstall%s (%sin%s)         install one or more packages
     %s-d, --download-only%s download packages without installing
     %s<package>%s           package name(s) to install
@@ -84,6 +87,7 @@ func printHelp() {
 		hi, d,
 		he, d, he, d, he, d, he, d, he, d, he, d,
 		hi, d,
+		hd, d, hd, d, he, d,
 		hd, d, hd, d, he, d,
 		hd, d, hd, d, he, d,
 		hd, d, hd, d, he, d, hd, d,
@@ -123,8 +127,8 @@ func isInstallCommand(cmd string) bool {
 
 func isKnownCommand(cmd string) bool {
 	switch cmd {
-	case "refresh", "ref", "dist-upgrade", "dup", "install", "in",
-		"install-new-recommends", "inr":
+	case "refresh", "ref", "dist-upgrade", "dup", "update", "up",
+		"install", "in", "install-new-recommends", "inr":
 		return true
 	}
 	return false
@@ -338,6 +342,10 @@ func main() {
 		}
 	case "dist-upgrade", "dup":
 		if err := handleDistUpgrade(ctx, tmpDir); err != nil {
+			exitCode = 1
+		}
+	case "update", "up":
+		if err := handleUpdate(ctx, tmpDir); err != nil {
 			exitCode = 1
 		}
 	case "install", "in":
