@@ -5,7 +5,7 @@ WIP README
 A parallel frontend for zypper. Speeds up slow zypper operations by running them in parallel across chroot-isolated workers
 
 
-inspirated by [zypperoni](https://github.com/pavinjosdev/zypperoni)
+inspired by [zypperoni](https://github.com/pavinjosdev/zypperoni)
 
 
 ## Build
