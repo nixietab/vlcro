@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -52,7 +53,7 @@ func printHelp() {
 	}
 
 	usage := fmt.Sprintf(`%susage%s: vlcro [-h] [-v] [-y] [-j N] [--debug] [--no-color]
-%s      {refresh,ref,dist-upgrade,dup,update,up,install,in,install-new-recommends,inr} ...
+%s      {refresh,ref,dist-upgrade,dup,update,up,install,in,install-new-recommends,inr,search,se} ...
 
 %s%s%s (%sv%s%s) makes zypper faster by running slow operations in parallel.
 
@@ -74,6 +75,9 @@ func printHelp() {
   %supdate%s (%sup%s)         update all installed packages
     %s-d, --download-only%s download packages without installing
 
+  %ssearch%s (%sse%s)          search for packages matching pattern
+    %s<pattern>%s           pattern(s) to search for
+
   %sinstall%s (%sin%s)         install one or more packages
     %s-d, --download-only%s download packages without installing
     %s<package>%s           package name(s) to install
@@ -90,6 +94,7 @@ func printHelp() {
 		hd, d, hd, d, he, d,
 		hd, d, hd, d, he, d,
 		hd, d, hd, d, he, d,
+		hd, d, hd, d, hd, d,
 		hd, d, hd, d, he, d, hd, d,
 		hd, d, hd, d, he, d)
 
@@ -125,10 +130,14 @@ func isInstallCommand(cmd string) bool {
 	return cmd == "install" || cmd == "in"
 }
 
+func isSearchCommand(cmd string) bool {
+	return cmd == "search" || cmd == "se"
+}
+
 func isKnownCommand(cmd string) bool {
 	switch cmd {
 	case "refresh", "ref", "dist-upgrade", "dup", "update", "up",
-		"install", "in", "install-new-recommends", "inr":
+		"install", "in", "install-new-recommends", "inr", "search", "se":
 		return true
 	}
 	return false
@@ -142,6 +151,15 @@ func parseArgsInto(args []string) (*config, error) {
 
 	for i < len(args) {
 		arg := args[i]
+
+		// search/se passes all remaining patterns and zypper search
+		// options verbatim to zypper.
+		if cmdFound && isSearchCommand(c.command) {
+			c.packages = append(c.packages, arg)
+			i++
+			continue
+		}
+
 		consumedNext := false
 
 		switch {
@@ -347,6 +365,15 @@ func main() {
 	case "update", "up":
 		if err := handleUpdate(ctx, tmpDir); err != nil {
 			exitCode = 1
+		}
+	case "search", "se":
+		if err := handleSearch(ctx, tmpDir); err != nil {
+			var see *searchExitError
+			if errors.As(err, &see) {
+				exitCode = see.code
+			} else {
+				exitCode = 1
+			}
 		}
 	case "install", "in":
 		if err := handleInstall(ctx, tmpDir); err != nil {

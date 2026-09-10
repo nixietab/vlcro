@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -792,6 +794,133 @@ func handleUpdate(ctx context.Context, tmpDir string) error {
 		}
 	}
 
+	return nil
+}
+
+// search / se
+
+type searchExitError struct {
+	code int
+}
+
+func (e *searchExitError) Error() string {
+	return fmt.Sprintf("zypper search failed with exit code %d", e.code)
+}
+
+// repoRefreshDelayMinutes returns the configured repo.refresh.delay (minutes)
+// from zypp.conf, or the default of 10 when unset.
+func repoRefreshDelayMinutes() int {
+	delay := -1
+	parse := func(path string) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return
+		}
+		re := regexp.MustCompile(`^\s*repo\.refresh\.delay\s*[:=]\s*(\d+)\s*$`)
+		for _, line := range strings.Split(string(data), "\n") {
+			if m := re.FindStringSubmatch(line); m != nil {
+				if n, err := strconv.Atoi(m[1]); err == nil {
+					delay = n
+				}
+			}
+		}
+	}
+	parse("/etc/zypp/zypp.conf")
+	if entries, err := filepath.Glob("/etc/zypp/zypp.conf.d/*.conf"); err == nil {
+		sort.Strings(entries)
+		for _, e := range entries {
+			parse(e)
+		}
+	}
+	if delay < 0 {
+		delay = 10
+	}
+	return delay
+}
+
+// repoNeedsRefresh mirrors zypper's auto-refresh policy: a repo needs
+// refreshing when its cached index file timestamp is older than
+// repo.refresh.delay. Repos never refreshed must be refreshed.
+func repoNeedsRefresh(alias string) bool {
+	delay := repoRefreshDelayMinutes()
+	rawPath := filepath.Join("/var/cache/zypp/raw", alias)
+	repomd := filepath.Join(rawPath, "repodata", "repomd.xml")
+
+	var last time.Time
+	if st, err := os.Stat(repomd); err == nil {
+		last = st.ModTime()
+	} else if info, err := os.Stat(rawPath); err == nil && info.IsDir() {
+		filepath.Walk(rawPath, func(_ string, fi os.FileInfo, err error) error {
+			if err == nil && fi.ModTime().After(last) {
+				last = fi.ModTime()
+			}
+			return nil
+		})
+	} else {
+		return true
+	}
+	if last.IsZero() {
+		return true
+	}
+	return time.Since(last) > time.Duration(delay)*time.Minute
+}
+
+// runSearch runs the real zypper search with terminal passthrough so the
+// output is identical to stock zypper.
+func runSearch(args []string) int {
+	cmd := exec.Command("zypper", append([]string{"--no-refresh", "search"}, args...)...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return exitErr.ExitCode()
+		}
+		return 1
+	}
+	return 0
+}
+
+func handleSearch(ctx context.Context, tmpDir string) error {
+	if len(cfg.packages) == 0 {
+		errorf("%s", colorText(colorError, "Search must have at least one search pattern"))
+		return fmt.Errorf("no search pattern specified")
+	}
+
+	statusMsg("Reading repository list")
+	xmlOutput, _ := zypperDryRun([]string{"repos"})
+	repos := findElements(xmlOutput, "repo")
+
+	var staleRepos []string
+	for _, r := range repos {
+		if r["enabled"] != "1" || r["autorefresh"] != "1" {
+			continue
+		}
+		if repoNeedsRefresh(r["alias"]) {
+			staleRepos = append(staleRepos, r["alias"])
+		}
+	}
+	debugf("Stale repos: %v", staleRepos)
+
+	if len(staleRepos) > 0 {
+		tracker := &MountTracker{}
+		statusMsg(fmt.Sprintf("Refreshing %d stale repo(s)", len(staleRepos)))
+		getZyppLock()
+		err := mainTask(ctx, staleRepos, tmpDir, true, tracker)
+		if err == context.Canceled {
+			vlcroCleanup(tmpDir, tracker)
+			return err
+		}
+		if err != nil {
+			warningf("%s", colorText(colorWarning, fmt.Sprintf("Parallel refresh failed (%v). Falling back to standard zypper...", err)))
+		}
+		vlcroCleanup(tmpDir, tracker)
+	}
+
+	code := runSearch(cfg.packages)
+	if code != 0 {
+		return &searchExitError{code: code}
+	}
 	return nil
 }
 
