@@ -400,17 +400,16 @@ type job struct {
 	size        float64
 }
 
-func makeLogMessages(item string, counter, total int) map[string]string {
+func makeLogMessages(item string, counter, total int, isRefresh bool) map[string]string {
 	m := make(map[string]string)
 	forceStr := ""
 	if cfg.force {
 		forceStr = "force "
 	}
-	switch cfg.command {
-	case "refresh", "ref":
+	if isRefresh {
 		m["error"] = fmt.Sprintf("Error %srefreshing repo [%d/%d] %q", forceStr, counter, total, item)
 		m["exception"] = fmt.Sprintf("SIGINT while %srefreshing repo [%d/%d] %q", forceStr, counter, total, item)
-	default:
+	} else {
 		m["error"] = fmt.Sprintf("Error downloading package [%d/%d] %q", counter, total, item)
 		m["exception"] = fmt.Sprintf("SIGINT while downloading package [%d/%d] %q", counter, total, item)
 	}
@@ -424,7 +423,7 @@ func refreshArgs() []string {
 	return []string{"refresh"}
 }
 
-func worker(ctx context.Context, wg *sync.WaitGroup, uuidPool chan string, tmpDir string, jobsChan chan job) {
+func worker(ctx context.Context, wg *sync.WaitGroup, uuidPool chan string, tmpDir string, jobsChan chan job, isRefresh bool) {
 	defer wg.Done()
 	for j := range jobsChan {
 		select {
@@ -434,7 +433,7 @@ func worker(ctx context.Context, wg *sync.WaitGroup, uuidPool chan string, tmpDi
 		}
 
 		uuid := <-uuidPool
-		msgs := makeLogMessages(j.item, j.itemCounter, j.totalItems)
+		msgs := makeLogMessages(j.item, j.itemCounter, j.totalItems, isRefresh)
 
 		if prog != nil {
 			prog.increment()
@@ -443,7 +442,7 @@ func worker(ctx context.Context, wg *sync.WaitGroup, uuidPool chan string, tmpDi
 
 		rootfs := filepath.Join(tmpDir, uuid, "rootfs")
 		var zypperArgs []string
-		if cfg.command == "refresh" || cfg.command == "ref" {
+		if isRefresh {
 			zypperArgs = []string{"--non-interactive"}
 			zypperArgs = append(zypperArgs, refreshArgs()...)
 			zypperArgs = append(zypperArgs, j.item)
@@ -486,7 +485,7 @@ func worker(ctx context.Context, wg *sync.WaitGroup, uuidPool chan string, tmpDi
 	}
 }
 
-func mainTask(ctx context.Context, taskItems []string, tmpDir string, needDev bool, tracker *MountTracker) error {
+func mainTask(ctx context.Context, taskItems []string, tmpDir string, needDev bool, tracker *MountTracker, isRefresh bool) error {
 	numWorkers := cfg.jobs
 	if len(taskItems) < numWorkers {
 		numWorkers = len(taskItems)
@@ -556,7 +555,7 @@ func mainTask(ctx context.Context, taskItems []string, tmpDir string, needDev bo
 	var wg sync.WaitGroup
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
-		go worker(ctx, &wg, uuidPool, tmpDir, jobsChan)
+		go worker(ctx, &wg, uuidPool, tmpDir, jobsChan, isRefresh)
 	}
 
 	itemCounter := 0
@@ -688,16 +687,20 @@ func handleRefresh(ctx context.Context, tmpDir string) error {
 		return nil
 	}
 
-	return mainTask(ctx, aliases, tmpDir, true, tracker)
+	return mainTask(ctx, aliases, tmpDir, true, tracker, true)
 }
 
 func handleDistUpgrade(ctx context.Context, tmpDir string) error {
 	tracker := &MountTracker{}
 	defer vlcroCleanup(tmpDir, tracker)
 
+	if err := refreshStaleRepos(ctx, tmpDir); err != nil {
+		return err
+	}
+
 	statusMsg("Reading package lists")
 	statusMsg("Building dependency tree")
-	info, err := dryRunAndParse([]string{"dist-upgrade", "--dry-run"})
+	info, err := dryRunAndParse([]string{"--no-refresh", "dist-upgrade", "--dry-run"})
 	if err != nil {
 		errorf("%s", colorText(colorError, fmt.Sprintf("%v\nThere are package conflicts that must be manually resolved. See output of:\nzypper --non-interactive --no-cd dist-upgrade --dry-run", err)))
 		return err
@@ -718,7 +721,7 @@ func handleDistUpgrade(ctx context.Context, tmpDir string) error {
 
 	if info.downloadSize > 0 {
 		statusMsg("Downloading packages")
-		err := mainTask(ctx, pkgNames(info.installs), tmpDir, false, tracker)
+		err := mainTask(ctx, pkgNames(info.installs), tmpDir, false, tracker, false)
 		if err == context.Canceled {
 			return err
 		}
@@ -748,9 +751,13 @@ func handleUpdate(ctx context.Context, tmpDir string) error {
 	tracker := &MountTracker{}
 	defer vlcroCleanup(tmpDir, tracker)
 
+	if err := refreshStaleRepos(ctx, tmpDir); err != nil {
+		return err
+	}
+
 	statusMsg("Reading package lists")
 	statusMsg("Building dependency tree")
-	info, err := dryRunAndParse([]string{"update", "--dry-run"})
+	info, err := dryRunAndParse([]string{"--no-refresh", "update", "--dry-run"})
 	if err != nil {
 		errorf("%s", colorText(colorError, fmt.Sprintf("Error: %v", err)))
 		return err
@@ -771,7 +778,7 @@ func handleUpdate(ctx context.Context, tmpDir string) error {
 
 	if info.downloadSize > 0 {
 		statusMsg("Downloading packages")
-		err := mainTask(ctx, pkgNames(info.installs), tmpDir, false, tracker)
+		err := mainTask(ctx, pkgNames(info.installs), tmpDir, false, tracker, false)
 		if err == context.Canceled {
 			return err
 		}
@@ -865,8 +872,49 @@ func repoNeedsRefresh(alias string) bool {
 	return time.Since(last) > time.Duration(delay)*time.Minute
 }
 
+// findStaleRepos mirrors zypper's auto-refresh policy: enabled repos with
+// autorefresh==1 whose cached metadata is older than repo.refresh.delay are
+// returned. Only those repos (that zypper itself would refresh) are refreshed.
+func findStaleRepos() []string {
+	statusMsg("Reading repository list")
+	xmlOutput, _ := zypperDryRun([]string{"repos"})
+	repos := findElements(xmlOutput, "repo")
+
+	var staleRepos []string
+	for _, r := range repos {
+		if r["enabled"] != "1" || r["autorefresh"] != "1" {
+			continue
+		}
+		if repoNeedsRefresh(r["alias"]) {
+			staleRepos = append(staleRepos, r["alias"])
+		}
+	}
+	debugf("Stale repos: %v", staleRepos)
+	return staleRepos
+}
+
+func refreshStaleRepos(ctx context.Context, tmpDir string) error {
+	staleRepos := findStaleRepos()
+	if len(staleRepos) == 0 {
+		return nil
+	}
+
+	tracker := &MountTracker{}
+	statusMsg(fmt.Sprintf("Refreshing %d stale repo(s)", len(staleRepos)))
+	getZyppLock()
+	err := mainTask(ctx, staleRepos, tmpDir, true, tracker, true)
+	releaseZyppLock()
+	unmountAll(tmpDir, tracker)
+	if err == context.Canceled {
+		return err
+	}
+	if err != nil {
+		warningf("%s", colorText(colorWarning, fmt.Sprintf("Parallel refresh failed (%v). Falling back to standard zypper...", err)))
+	}
+	return nil
+}
+
 // runSearch runs the real zypper search with terminal passthrough so the
-// output is identical to stock zypper.
 func runSearch(args []string) int {
 	cmd := exec.Command("zypper", append([]string{"--no-refresh", "search"}, args...)...)
 	cmd.Stdin = os.Stdin
@@ -887,34 +935,8 @@ func handleSearch(ctx context.Context, tmpDir string) error {
 		return fmt.Errorf("no search pattern specified")
 	}
 
-	statusMsg("Reading repository list")
-	xmlOutput, _ := zypperDryRun([]string{"repos"})
-	repos := findElements(xmlOutput, "repo")
-
-	var staleRepos []string
-	for _, r := range repos {
-		if r["enabled"] != "1" || r["autorefresh"] != "1" {
-			continue
-		}
-		if repoNeedsRefresh(r["alias"]) {
-			staleRepos = append(staleRepos, r["alias"])
-		}
-	}
-	debugf("Stale repos: %v", staleRepos)
-
-	if len(staleRepos) > 0 {
-		tracker := &MountTracker{}
-		statusMsg(fmt.Sprintf("Refreshing %d stale repo(s)", len(staleRepos)))
-		getZyppLock()
-		err := mainTask(ctx, staleRepos, tmpDir, true, tracker)
-		if err == context.Canceled {
-			vlcroCleanup(tmpDir, tracker)
-			return err
-		}
-		if err != nil {
-			warningf("%s", colorText(colorWarning, fmt.Sprintf("Parallel refresh failed (%v). Falling back to standard zypper...", err)))
-		}
-		vlcroCleanup(tmpDir, tracker)
+	if err := refreshStaleRepos(ctx, tmpDir); err != nil {
+		return err
 	}
 
 	code := runSearch(cfg.packages)
@@ -933,9 +955,13 @@ func handleInstall(ctx context.Context, tmpDir string) error {
 	tracker := &MountTracker{}
 	defer vlcroCleanup(tmpDir, tracker)
 
+	if err := refreshStaleRepos(ctx, tmpDir); err != nil {
+		return err
+	}
+
 	statusMsg("Reading package lists")
 	statusMsg("Building dependency tree")
-	dryRunArgs := []string{"install", "--dry-run"}
+	dryRunArgs := []string{"--no-refresh", "install", "--dry-run"}
 	dryRunArgs = append(dryRunArgs, cfg.packages...)
 	info, err := dryRunAndParse(dryRunArgs)
 	if err != nil {
@@ -958,7 +984,7 @@ func handleInstall(ctx context.Context, tmpDir string) error {
 
 	if info.downloadSize > 0 {
 		statusMsg("Downloading packages")
-		err := mainTask(ctx, pkgNames(info.installs), tmpDir, false, tracker)
+		err := mainTask(ctx, pkgNames(info.installs), tmpDir, false, tracker, false)
 		if err == context.Canceled {
 			return err
 		}
@@ -988,9 +1014,13 @@ func handleINR(ctx context.Context, tmpDir string) error {
 	tracker := &MountTracker{}
 	defer vlcroCleanup(tmpDir, tracker)
 
+	if err := refreshStaleRepos(ctx, tmpDir); err != nil {
+		return err
+	}
+
 	statusMsg("Reading package lists")
 	statusMsg("Building dependency tree")
-	info, err := dryRunAndParse([]string{"install-new-recommends", "--dry-run"})
+	info, err := dryRunAndParse([]string{"--no-refresh", "install-new-recommends", "--dry-run"})
 	if err != nil {
 		errorf("%s", colorText(colorError, fmt.Sprintf("Error: %v", err)))
 		return err
@@ -1011,7 +1041,7 @@ func handleINR(ctx context.Context, tmpDir string) error {
 
 	if info.downloadSize > 0 {
 		statusMsg("Downloading packages")
-		err := mainTask(ctx, pkgNames(info.installs), tmpDir, false, tracker)
+		err := mainTask(ctx, pkgNames(info.installs), tmpDir, false, tracker, false)
 		if err == context.Canceled {
 			return err
 		}
@@ -1023,7 +1053,7 @@ func handleINR(ctx context.Context, tmpDir string) error {
 	vlcroCleanup(tmpDir, tracker)
 
 	if !cfg.downloadOnly {
-		infof("%s", colorText(colorInfo, "Vlcro has finished its tasks. Handing you over to zypper..."))
+		infof("%s", colorText(colorInfo, "vlcro has finished its tasks. Handing you over to zypper..."))
 		nonInteractive := ""
 		if cfg.noConfirm {
 			nonInteractive = "--non-interactive"

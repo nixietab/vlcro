@@ -149,6 +149,13 @@ func setupChroot(tmpDir, uuid string, needDev bool, tracker *MountTracker) error
 			return fmt.Errorf("mount tmpfs: %w", err)
 		}
 		tracker.Add(tmpPath)
+
+		procPath := filepath.Join(rootfs, "proc")
+		if err := retryMount("/proc", procPath, "", syscall.MS_BIND, "", maxRetries); err != nil {
+			debugf("Warning: failed to mount /proc (non-critical): %v", err)
+		} else {
+			tracker.Add(procPath)
+		}
 	}
 
 	runPath := filepath.Join(rootfs, "run")
