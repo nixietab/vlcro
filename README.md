@@ -21,7 +21,7 @@ The command syntax is kept as similar as possible with zypper
 usage: vlcro [-h] [-v] [-y] [-j N] [--debug] [--no-color]
       {refresh,ref,dist-upgrade,dup,update,up,install,in,install-new-recommends,inr,search,se} ...
 
-vlcro (v0.1.0) makes zypper faster by running slow operations in parallel.
+vlcro (v0.1.1) makes zypper faster by running slow operations in parallel.
 
 options:
   -h, --help            show this help message and exit
