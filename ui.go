@@ -171,15 +171,20 @@ func formatSize(bytes float64) string {
 		MiB = 1000 * KiB
 		GiB = 1000 * MiB
 	)
+	neg := ""
+	if bytes < 0 {
+		neg = "-"
+		bytes = -bytes
+	}
 	switch {
 	case bytes >= GiB:
-		return fmt.Sprintf("%.2f GiB", bytes/GiB)
+		return fmt.Sprintf("%s%.2f GiB", neg, bytes/GiB)
 	case bytes >= MiB:
-		return fmt.Sprintf("%.2f MiB", bytes/MiB)
+		return fmt.Sprintf("%s%.2f MiB", neg, bytes/MiB)
 	case bytes >= KiB:
-		return fmt.Sprintf("%.2f KiB", bytes/KiB)
+		return fmt.Sprintf("%s%.2f KiB", neg, bytes/KiB)
 	default:
-		return fmt.Sprintf("%.0f B", bytes)
+		return fmt.Sprintf("%s%.0f B", neg, bytes)
 	}
 }
 
@@ -411,12 +416,13 @@ func printTransactionSummary(installs, removes []packageInfo, downloadSize, diff
 		fmt.Printf("Need to get %s of archives.\n", formatSize(downloadSize))
 	}
 
-	spacePrefix := ""
-	if diffBytes >= 0 {
-		spacePrefix = "+"
+	if diffBytes < 0 {
+		fmt.Printf("After this operation, %s of disk space will be freed.\n",
+			formatSize(-diffBytes))
+	} else {
+		fmt.Printf("After this operation, +%s of additional disk space will be used.\n",
+			formatSize(diffBytes))
 	}
-	fmt.Printf("After this operation, %s%s of additional disk space will be used.\n",
-		spacePrefix, formatSize(diffBytes))
 }
 
 // printWrappedNames prints package names wrapped to fit within termWidth.
