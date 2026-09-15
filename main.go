@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	vlcroVersion  = "0.1.0"
+	vlcroVersion  = "0.1.1"
 	zypperPidFile = "/run/zypp.pid"
 	maxRetries    = 3
 	retryDelay    = 100_000_000 // 100ms as int64 nanoseconds
